@@ -1,0 +1,981 @@
+@name ACF MISSILES - CLEAN SLATE MULTI-STATION RACK v38 CONTROLLED ACF EXHAUST + PHYSICAL XYZ SCALING + WIRE/LASER TURN SMOOTHING + LASER LOS
+@inputs Fire Reset
+@outputs LoadedCount:number TargetCount:number SalvoShots:number Reloading:number Status:string CreateStatus:string RegisteredIDs:string Target:entity Position:vector
+@persist Missiles:array RackHolos:array Targets:array StationLoaded:array StationFired:array StationEnabled:array WeaponIndices:array StationGuidanceTypes:array StationPositions:array StationAngles:array
+@persist SearchHolo:entity RackRootHolo:entity
+@persist AutoLaunchEnabled:number MultiTargetEnabled:number PreventRepeatPerLock:number MissileIndex:number MaxRockets:number MaxSpeedMPH:number MissileScale:vector GravityScale:number HomingTurnScale:number ProtectFriendlyMunitions:number SmokeScale:number SmokeColor:vector SmokeLength:number SmokeOpacity:number FlameScale:number
+@persist FindingDistance:number FindingConeAngle:number SearchInterval:number GuidanceStartDelay:number
+@persist SearchLocalPosition:vector SearchLocalAngle:angle
+@persist RackLocalPosition:vector RackLocalAngle:angle
+@persist ReloadDelay:number
+@persist StationReloading:array StationReloadAt:array
+@persist LaunchQueueActive:number LaunchQueueNext:number LaunchQueueAutoMode:number LaunchQueueFired:number LaunchInterval:number LaunchQueueRetryCount:number LaunchQueueRetryLimit:number LaunchQueueShotLimit:number MissilesPerClick:number
+@persist DebugTargets:number DebugPrintInterval:number LastDebugPrint:number
+@persist HoloBuildIndex:number SetupComplete:number
+@persist MissileFuse:string WarheadFillerMass:number
+@persist LastFire:number LastReset:number
+@persist WorkFindCount:number WorkPresent:number WorkAssigned:number WorkReady:number WorkFired:number
+@persist WorkMissile:entity WorkHolo:entity WorkTarget:entity WorkCandidate:entity
+@persist WorkDirection:vector
+@persist WorkStation:number
+
+# The bridge's acfCleanMissileList() includes every registered ACF gun class
+# whose type is "missile". This includes missile, BOMB and GBU definitions.
+# WeaponIndices[] are one-based indexes into RegisteredIDs.
+# StationGuidanceTypes[] selects native ACF guidance: Wire or Laser.
+# Powered missiles use the BGM-71E flight baseline. BOMB/GBU classes marked
+# nothrust remain gravity-driven with their original fins/drag/mass and still
+# accept native Wire/Laser guidance.
+# The bridge does not emulate guidance: ACF creates the selected native guidance object.
+# Powered missile flight stats use BGM-71E ASM. Gravity-only bombs retain their selected ACF no-thrust flight stats.
+#
+# NATIVE ACF GUIDANCE:
+# The E2 chip's Position vector output supplies the live target mass center
+# to native ACF Wire/Laser guidance; Target:entity remains for compatibility.
+# The bridge keeps the chip as missile.Launcher even while
+# the loaded missile is parented to a station hologram. Wire and Laser both use
+# the live E2 Position/Target outputs.
+# Wire guidance keeps ACF's live target updates and wire-length limit; it can steer through a full 180-degree reversal.
+# Laser keeps ACF's native tracking cone, and the bridge enforces clear brush line-of-sight. On loss it coasts along its current flight direction and can reacquire when a valid laser point returns inside the cone.
+# All active rack stations share the master rack orientation; target locks do not steer them.
+# The bridge uses a control-point-enabled copy of ACF Rocket Motor; original ACF PCF/addon files remain untouched.
+# MaxSpeedMPH caps flight speed (0 disables); MissileScale scales the visual model and server collision mesh in XYZ once at load.
+# GravityScale multiplies ACF's native gravity from 0 to 10 (1 = normal sv_gravity).
+# HomingTurnScale is steering smoothing time in seconds: 0 = native ACF, higher = more gradual. No turn-angle limit.
+# ProtectFriendlyMunitions = 1 blocks ACF damage (including blast damage) between bridge-created missiles/bombs; 0 disables it.
+# WarheadFillerMass is ACF filler mass in kg; 0 keeps the selected round's default filler volume.
+# A positive value overrides the actual ACF payload; ACF's scaled explosion effect follows FillerMass automatically.
+# GuidanceStartDelay holds native ACF steering for each missile after a straight-ahead rack launch.
+# Position refreshes at the ACF 66 Hz flight cadence from the target physics mass center (or bbox center without physics).
+# Target search excludes map logic/brush entities, environment controllers, items, props, helicopter NPCs, and Wire entities. Other NPC classes remain eligible.
+
+@trigger none
+
+# Initialize persisted state before any user-defined function references it.
+# The detailed rack configuration is still applied in the main first() block below.
+if (first()) {
+    LoadedCount = 0
+
+    # Initialize every scalar used by functions below BEFORE those functions
+    # are compiled. The editable rack configuration later in this file applies
+    # the user's chosen values during this same first() execution.
+    MaxRockets = 4
+    MaxSpeedMPH = 170
+    MissileScale = vec(1, 1, 1)
+    GravityScale = 1
+    HomingTurnScale = 0.65
+    ProtectFriendlyMunitions = 1
+    SmokeScale = 1
+    SmokeColor = vec(255, 255, 255)
+    SmokeLength = 1
+    SmokeOpacity = 145
+    FlameScale = 1
+    Target = noentity()
+
+    Missiles = array()
+    RackHolos = array()
+    Targets = array()
+    StationLoaded = array()
+    StationFired = array()
+    StationEnabled = array()
+    WeaponIndices = array()
+    StationGuidanceTypes = array()
+    StationPositions = array()
+    StationAngles = array()
+    SearchHolo = noentity()
+    RackRootHolo = noentity()
+    AutoLaunchEnabled = 0
+    MultiTargetEnabled = 0
+    PreventRepeatPerLock = 0
+    MissileIndex = 0
+    FindingDistance = 0
+    FindingConeAngle = 0
+    SearchInterval = 0
+    GuidanceStartDelay = 0
+    Position = vec(0)
+    SearchLocalPosition = vec(0)
+    SearchLocalAngle = ang(0, 0, 0)
+    RackLocalPosition = vec(0)
+    RackLocalAngle = ang(0, 0, 0)
+    ReloadDelay = 0
+    StationReloading = array()
+    StationReloadAt = array()
+    LaunchQueueActive = 0
+    LaunchQueueNext = 0
+    LaunchQueueAutoMode = 0
+    LaunchQueueFired = 0
+    LaunchInterval = 0
+    LaunchQueueRetryCount = 0
+    LaunchQueueRetryLimit = 0
+    LaunchQueueShotLimit = 1
+    MissilesPerClick = 0
+    DebugTargets = 0
+    DebugPrintInterval = 0
+    LastDebugPrint = 0
+    HoloBuildIndex = 0
+    SetupComplete = 0
+    MissileFuse = ""
+    WarheadFillerMass = 0
+    LastFire = 0
+    LastReset = 0
+    WorkFindCount = 0
+    WorkPresent = 0
+    WorkAssigned = 0
+    WorkReady = 0
+    WorkFired = 0
+    WorkMissile = noentity()
+    WorkHolo = noentity()
+    WorkTarget = noentity()
+    WorkCandidate = noentity()
+    WorkDirection = vec(0)
+    WorkStation = 0
+}
+
+function void configureMissile(M:entity) {
+    # Optional fuse choice is still created and configured by ACF itself.
+    if (MissileFuse != "") { acfCleanMissileFuse(M, MissileFuse) }
+
+    # Optional speed cap: 0 disables the cap; positive values are MPH.
+    acfCleanMissileMaxSpeedMPH(M, MaxSpeedMPH)
+
+    # XYZ model + physical collision scale. The server rebuilds the actual convex physics
+    # mesh once here, before parenting/welding. A warning is printed if the source
+    # physics mesh cannot be rebuilt; visual-only fallback is never reported as success.
+    acfCleanMissileModelScale(M, MissileScale)
+
+    # Gravity: 0 = weightless, 1 = normal sv_gravity, 10 = 10x.
+    # Applies to powered missiles too; BOMB/GBU remain gravity-only.
+    acfCleanMissileGravityScale(M, GravityScale)
+
+    # Smooth the desired steering bearing without changing ACF agility or turn limits.
+    # 0 = native ACF; 0.5 = moderate lag; 1 = heavier; 2 = very gradual.
+    acfCleanMissileHomingTurnScale(M, HomingTurnScale)
+
+    # Friendly protection is applied to every bridge-created round. ACF damage
+    # is ignored only when both the damaged munition and damage source are
+    # protected bridge-created munitions, including rounds from other racks.
+    acfCleanMissileFriendlyProtection(M, ProtectFriendlyMunitions)
+
+    # Per-missile ACF Rocket Motor controls. Defaults preserve the original PCF look.
+    # SmokeScale = 0 hides smoke; 1 is stock; higher values make it larger.
+    # SmokeLength = 1 is stock lifetime/trail; lower values shorten it.
+    # SmokeColor uses RGB values from 0 to 255.
+    # SmokeOpacity = 145 is the original bridge default.
+    # FlameScale = 0 hides the flame; 1 is stock; higher values enlarge it independently.
+    acfCleanMissileSmokeScale(M, SmokeScale)
+    acfCleanMissileSmokeColor(M, SmokeColor)
+    acfCleanMissileSmokeLength(M, SmokeLength)
+    acfCleanMissileSmokeOpacity(M, SmokeOpacity)
+    acfCleanMissileFlameScale(M, FlameScale)
+}
+
+# Each missile gets its own one-shot anonymous Lambda timer.
+# The timer releases that missile's native ACF guidance independently of all
+# other stations and later launches.
+function void startGuidanceDelay(M:entity) {
+    if (GuidanceStartDelay <= 0 | !M:isValid()) { return }
+
+    # acfCleanMissileLaunchHeld() already enabled the hold before ACF's
+    # synchronous first flight Think. This Lambda only releases that hold.
+    timer(GuidanceStartDelay, function() {
+        if (M:isValid()) {
+            acfCleanMissileGuidanceHold(M, 0)
+        }
+    })
+}
+
+function void loadStation(S:number) {
+    if (S < 1 | S > MaxRockets) { return }
+    if (StationEnabled[S, number] == 0 | StationLoaded[S, number] != 0) { return }
+    WorkHolo = holoEntity(9000 + S)
+    if (!WorkHolo:isValid()) {
+        Status = "LOAD FAILED: station hologram " + S + " is invalid"
+        return
+    }
+
+    WorkMissile = acfCleanMissileCreateGuidedFiller(WeaponIndices[S, number], WorkHolo:pos(), WorkHolo:angles(), StationGuidanceTypes[S, string], WarheadFillerMass)
+    if (!WorkMissile:isValid()) {
+        Status = "LOAD FAILED station " + S + ": " + acfCleanMissileStatus()
+        CreateStatus = acfCleanMissileStatus()
+        return
+    }
+
+    # Apply configuration (including the one-time XYZ collision rebuild) before
+    # parenting the missile to its rack hologram.
+    configureMissile(WorkMissile)
+    acfCleanMissileParent(WorkMissile, WorkHolo)
+    # Loaded weapons occupy the rack but must not collide with other entities.
+    # Collision group 5 is set in the Lua bridge after SetParent() so E2
+    # doesn't need to call it here.
+    WorkMissile:noCollideAll(1)
+    Missiles[S, entity] = WorkMissile
+    StationLoaded[S, number] = 1
+    findExcludeEntity(WorkMissile)
+    Status = "STATION " + S + " LOADED"
+    CreateStatus = acfCleanMissileStatus()
+}
+
+function void loadAllStations() {
+    for (I = 1, MaxRockets) {
+        loadStation(I)
+    }
+}
+
+function void serviceStationReloads() {
+    # Check every station for an unexpectedly lost round, independently of
+    # the normal post-launch reload timer.
+    # This server's E2 build lacks the hidden-state accessor, so detonated rounds
+    # are detected when ACF finishes removing the entity and isValid() becomes 0.
+    for (I = 1, MaxRockets) {
+        if (StationEnabled[I, number] != 0 & StationLoaded[I, number] != 0) {
+            WorkMissile = Missiles[I, entity]
+            WorkHolo = holoEntity(9000 + I)
+
+            # A missing entity or detached round means this station is no
+            # longer physically loaded and must recover now.
+            if (!WorkMissile:isValid()) {
+                StationLoaded[I, number] = 0
+                Missiles[I, entity] = noentity()
+                StationReloading[I, number] = 1
+                StationReloadAt[I, number] = curtime()
+                Status = "STATION " + I + " ROUND LOST - RELOADING"
+            } elseif (WorkHolo:isValid() & WorkMissile:parent() != WorkHolo) {
+                # A live round that has become detached is not a valid rack load.
+                acfCleanMissileRemove(WorkMissile)
+                StationLoaded[I, number] = 0
+                Missiles[I, entity] = noentity()
+                StationReloading[I, number] = 1
+                StationReloadAt[I, number] = curtime()
+                Status = "STATION " + I + " ROUND DETACHED - RELOADING"
+            }
+        }
+
+        # Normal timed reloads and immediate recovery reloads share this
+        # per-station service. Immediate recovery sets the deadline to now.
+        if (StationReloading[I, number] != 0 & curtime() >= StationReloadAt[I, number]) {
+            if (StationEnabled[I, number] != 0 & StationLoaded[I, number] == 0) {
+                loadStation(I)
+                if (StationLoaded[I, number] != 0) {
+                    StationReloading[I, number] = 0
+                    StationReloadAt[I, number] = 0
+                } else {
+                    StationReloadAt[I, number] = curtime() + 1
+                }
+            } else {
+                StationReloading[I, number] = 0
+                StationReloadAt[I, number] = 0
+            }
+        }
+    }
+}
+
+function number fireStation(S:number, AutoMode:number) {
+    if (S < 1 | S > MaxRockets) { return 0 }
+    if (StationLoaded[S, number] == 0) { return 0 }
+    WorkMissile = Missiles[S, entity]
+    if (!WorkMissile:isValid()) {
+        StationLoaded[S, number] = 0
+        Missiles[S, entity] = noentity()
+        return 0
+    }
+
+    WorkTarget = Targets[S, entity]
+    if (AutoMode != 0 & !WorkTarget:isValid()) { return 0 }
+    if (AutoMode != 0 & PreventRepeatPerLock != 0 & WorkTarget:isValid() & StationFired[S, number] != 0) { return 0 }
+
+    WorkHolo = holoEntity(9000 + S)
+    if (!WorkHolo:isValid()) { return 0 }
+
+    # SAM-style launch: leave the rack along the station's fixed forward axis.
+    # The locked target is deliberately NOT used for initial launch direction.
+    # Native ACF guidance is held for GuidanceStartDelay, then released by an
+    # independent one-shot Lambda timer for this exact missile.
+    WorkDirection = WorkHolo:forward()
+
+    # Re-enable normal collision as the weapon leaves the rack.
+    WorkMissile:noCollideAll(0)
+    if (acfCleanMissileLaunchHeld(WorkMissile, WorkDirection, GuidanceStartDelay > 0) != 0) {
+        if (GuidanceStartDelay > 0) { startGuidanceDelay(WorkMissile) }
+        Missiles[S, entity] = noentity()
+        StationLoaded[S, number] = 0
+        StationFired[S, number] = 1
+        # Independent reload: this station's timer starts at its successful launch.
+        StationReloading[S, number] = 1
+        StationReloadAt[S, number] = curtime() + ReloadDelay
+        Status = "STATION " + S + " LAUNCHED"
+        return 1
+    }
+
+    # Launch failed; keep the loaded weapon non-colliding inside the rack.
+    WorkMissile:noCollideAll(1)
+    Status = "LAUNCH FAILED station " + S + ": " + acfCleanMissileStatus()
+    return 0
+}
+
+function void launchQueueStep() {
+    if (LaunchQueueActive == 0) { return }
+
+    # Stop as soon as the configured number of SUCCESSFUL launches is reached.
+    # MissilesPerClick = 0 is the special single-shot setting.
+    if (LaunchQueueFired >= LaunchQueueShotLimit) {
+        LaunchQueueActive = 0
+        stoptimer("launch_queue")
+        Status = "LAUNCH QUEUE COMPLETE - " + LaunchQueueFired + " STATION(S) FIRED"
+        if (DebugTargets != 0) { print("RACK QUEUE FINISHED", "shots", LaunchQueueFired, "limit", LaunchQueueShotLimit, "mode", LaunchQueueAutoMode) }
+        return
+    }
+
+    # Process ONLY one station per timer pass. ACF may reject a launch while
+    # its weapon/launcher is still on cooldown; never burn through remaining
+    # stations in the same E2 execution after one rejected launch.
+    if (LaunchQueueNext > MaxRockets) {
+        LaunchQueueActive = 0
+        stoptimer("launch_queue")
+        if (DebugTargets != 0) { print("RACK QUEUE FINISHED", "shots", LaunchQueueFired, "mode", LaunchQueueAutoMode) }
+        if (LaunchQueueFired == 0 & LaunchQueueAutoMode == 0) {
+            Status = "FIRE BLOCKED: NO ELIGIBLE LOADED STATIONS"
+        } elseif (LaunchQueueFired > 0) {
+            Status = "LAUNCH QUEUE COMPLETE - " + LaunchQueueFired + " STATION(S) FIRED"
+        }
+        return
+    }
+
+    WorkStation = LaunchQueueNext
+    WorkTarget = Targets[WorkStation, entity]
+
+    if (StationEnabled[WorkStation, number] == 0) {
+        if (DebugTargets != 0) { print("RACK QUEUE SKIP", WorkStation, "disabled") }
+        LaunchQueueNext = WorkStation + 1
+        LaunchQueueRetryCount = 0
+        return
+    }
+
+    if (StationLoaded[WorkStation, number] == 0) {
+        if (DebugTargets != 0) { print("RACK QUEUE WAIT", WorkStation, "not loaded; reload pending", StationReloading[WorkStation, number]) }
+        # Do not skip a station that is still reloading. Wait for its own
+        # reload service to make it ready, preserving strict front-to-rear order.
+        if (StationReloading[WorkStation, number] != 0) {
+            return
+        }
+        # No reload is pending, so this station cannot currently participate.
+        LaunchQueueNext = WorkStation + 1
+        LaunchQueueRetryCount = 0
+        return
+    }
+
+    if (DebugTargets != 0) {
+        if (WorkTarget:isValid()) {
+            print("RACK QUEUE TRY", WorkStation, "attempt", LaunchQueueRetryCount + 1, "loaded", StationLoaded[WorkStation, number], "target", WorkTarget:id(), WorkTarget:getClass(), WorkTarget:name(), WorkTarget:model())
+        } else {
+            print("RACK QUEUE TRY", WorkStation, "attempt", LaunchQueueRetryCount + 1, "loaded", StationLoaded[WorkStation, number], "target NONE")
+        }
+    }
+
+    WorkFired = fireStation(WorkStation, LaunchQueueAutoMode)
+    if (DebugTargets != 0) { print("RACK QUEUE RESULT", WorkStation, WorkFired, Status) }
+
+if (WorkFired != 0) {
+    LaunchQueueFired++
+    SalvoShots = LaunchQueueFired
+    LaunchQueueNext = (WorkStation % MaxRockets) + 1
+    LaunchQueueRetryCount = 0
+
+
+        if (LaunchQueueFired >= LaunchQueueShotLimit) {
+            LaunchQueueActive = 0
+            stoptimer("launch_queue")
+            Status = "LAUNCH QUEUE COMPLETE - " + LaunchQueueFired + " STATION(S) FIRED"
+            if (DebugTargets != 0) { print("RACK QUEUE FINISHED", "shots", LaunchQueueFired, "limit", LaunchQueueShotLimit, "mode", LaunchQueueAutoMode) }
+            return
+        }
+    } else {
+        # Retry this station on a later timer pass instead of immediately
+        # trying every remaining missile in one execution. After the retry
+        # limit, advance so one faulty station cannot deadlock the rack.
+        LaunchQueueRetryCount++
+        if (LaunchQueueRetryCount > LaunchQueueRetryLimit) {
+            if (DebugTargets != 0) { print("RACK QUEUE SKIP", WorkStation, "retry limit reached", LaunchQueueRetryLimit, Status) }
+            LaunchQueueNext = WorkStation + 1
+            LaunchQueueRetryCount = 0
+        }
+    }
+
+}
+
+function void launchSalvo(AutoMode:number) {
+    if (LaunchQueueActive != 0) { return }
+
+LaunchQueueActive = 1
+# Keep the persistent station pointer, but wrap it if MaxRockets was reduced.
+if (LaunchQueueNext < 1 | LaunchQueueNext > MaxRockets) { LaunchQueueNext = 1 }
+LaunchQueueAutoMode = AutoMode
+LaunchQueueFired = 0
+LaunchQueueRetryCount = 0
+    
+    
+    if (MissilesPerClick > 0) {
+        LaunchQueueShotLimit = min(MissilesPerClick, MaxRockets)
+    } else {
+        LaunchQueueShotLimit = 1
+    }
+    SalvoShots = 0
+    Status = "LAUNCH QUEUE STARTED"
+    if (DebugTargets != 0) { print("RACK QUEUE STARTED", "mode", AutoMode, "loaded", LoadedCount) }
+    # One repeating callback owns the queue lifecycle. Do not recreate a
+    # same-named callback timer from inside its own callback: Wiremod keeps
+    # it registered until that callback returns.
+    timer("launch_queue", LaunchInterval, 0, function() { launchQueueStep() })
+    launchQueueStep()
+}
+
+# ACF native Wire guidance prefers the live Position vector over Target:entity.
+# E2 owns the aim point: use the real physics mass center whenever the target
+# has valid physics; non-physics entities use their world-space bounding-box center.
+# Refresh at 66 Hz to match ACF missile CalcFlight(), not a 20 Hz stepped target.
+function void updateGuidancePosition() {
+    if (!Target:isValid()) {
+        Position = vec(0)
+        return
+    }
+
+    if (Target:isValidPhysics()) {
+        Position = Target:massCenter()
+    } else {
+        Position = Target:boxCenterW()
+    }
+}
+
+function void scanTargets() {
+    SearchHolo = holoEntity(9100)
+    if (!SearchHolo:isValid()) { return }
+    if (!findCanQuery()) { return }
+
+    WorkFindCount = findInCone(SearchHolo:pos(), SearchHolo:forward(), FindingDistance, FindingConeAngle / 2)
+
+    # Diagnostic output: print the actual entities returned by findInCone,
+    # including class, map name, model, entity index, and position.
+    # Rate-limited so a 0.25-second scan does not flood chat.
+    if (DebugTargets != 0 & curtime() >= LastDebugPrint + DebugPrintInterval) {
+        LastDebugPrint = curtime()
+        print("RACK FIND DEBUG", "count", WorkFindCount, "range", FindingDistance, "cone", FindingConeAngle)
+        for (J = 1, min(WorkFindCount, 16)) {
+            WorkCandidate = findResult(J)
+            if (WorkCandidate:isValid()) {
+                print("RACK FOUND", J, "ent", WorkCandidate:id(), "class", WorkCandidate:getClass(), "name", WorkCandidate:name(), "model", WorkCandidate:model(), "pos", WorkCandidate:pos())
+            }
+        }
+        if (WorkTarget:isValid()) {
+            print("RACK TARGET", "ent", WorkTarget:id(), "class", WorkTarget:getClass(), "name", WorkTarget:name(), "model", WorkTarget:model())
+        } else {
+            print("RACK TARGET", "none")
+        }
+    }
+
+    if (MultiTargetEnabled == 0) {
+        WorkTarget = Targets[1, entity]
+        WorkPresent = 0
+        if (WorkTarget:isValid()) {
+            for (J = 1, WorkFindCount) {
+                if (findResult(J) == WorkTarget) { WorkPresent = 1 }
+            }
+        }
+        if (!WorkTarget:isValid() | WorkPresent == 0) {
+            if (WorkFindCount > 0) {
+                WorkTarget = findResult(1)
+            } else {
+                WorkTarget = noentity()
+            }
+            if (WorkTarget != Targets[1, entity]) {
+                for (I = 1, MaxRockets) { StationFired[I, number] = 0 }
+            }
+        }
+        for (I = 1, MaxRockets) { Targets[I, entity] = WorkTarget }
+        Target = WorkTarget
+    } else {
+        for (I = 1, MaxRockets) {
+            WorkTarget = Targets[I, entity]
+            WorkPresent = 0
+            if (WorkTarget:isValid()) {
+                for (J = 1, WorkFindCount) {
+                    if (findResult(J) == WorkTarget) { WorkPresent = 1 }
+                }
+            }
+            if (!WorkTarget:isValid() | WorkPresent == 0) {
+                Targets[I, entity] = noentity()
+                StationFired[I, number] = 0
+            }
+        }
+
+        if (WorkTarget:isValid()) { Target = WorkTarget } else { Target = noentity() }
+
+        for (I = 1, MaxRockets) {
+            WorkTarget = Targets[I, entity]
+            if (StationEnabled[I, number] != 0 & !WorkTarget:isValid()) {
+                for (J = 1, WorkFindCount) {
+                    WorkCandidate = findResult(J)
+                    WorkAssigned = 0
+                    for (K = 1, MaxRockets) {
+                        if (K != I & Targets[K, entity] == WorkCandidate) { WorkAssigned = 1 }
+                    }
+                    if (WorkAssigned == 0) {
+                        Targets[I, entity] = WorkCandidate
+                        StationFired[I, number] = 0
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    TargetCount = 0
+    if (MultiTargetEnabled == 0) {
+        WorkTarget = Targets[1, entity]
+        if (WorkTarget:isValid()) { TargetCount = 1 }
+    } else {
+        for (I = 1, MaxRockets) {
+            WorkTarget = Targets[I, entity]
+            if (WorkTarget:isValid()) { TargetCount = TargetCount + 1 }
+        }
+    }
+
+    updateGuidancePosition()
+
+    if (DebugTargets != 0 & curtime() == LastDebugPrint) {
+        for (I = 1, MaxRockets) {
+            WorkTarget = Targets[I, entity]
+            if (WorkTarget:isValid()) {
+                print("RACK ASSIGN", "station", I, "ent", WorkTarget:id(), "class", WorkTarget:getClass(), "name", WorkTarget:name())
+            }
+        }
+    }
+
+    if (AutoLaunchEnabled != 0 & LaunchQueueActive == 0) {
+        WorkReady = 0
+        for (I = 1, MaxRockets) {
+            WorkTarget = Targets[I, entity]
+            if (StationLoaded[I, number] != 0 & WorkTarget:isValid() & (PreventRepeatPerLock == 0 | StationFired[I, number] == 0)) {
+                WorkReady = 1
+            }
+        }
+        if (WorkReady != 0) { launchSalvo(1) }
+    }
+}
+
+function void configureFindFilters() {
+    findClearWhiteList()
+    findClearBlackList()
+
+    # ONLY allow NPC entity classes.
+    findIncludeClass("npc_")
+
+    # Map logic / brush entities - exact class names.
+    findExcludeClass("base_point")
+    findExcludeClass("gmod_gamerules")
+    findExcludeClass("network")
+    findExcludeClass("water_lod_control")
+    findExcludeClass("soundent")
+    findExcludeClass("scene_manager")
+    findExcludeClass("lua_run")
+    findExcludeClass("spotlight_end")
+    findExcludeClass("beam")
+    findExcludeClass("stpm64_e2_output_hooker")
+
+    # Ambient / environment entities (ambient_generic, ambient_* sounds, etc.)
+    findExcludeClass("ambient_generic")
+    findExcludeClass("ambient_energy")
+    findExcludeClass("ambient_fire")
+    findExcludeClass("ambient_light")
+    findExcludeClass("ambient_water")
+    findExcludeClass("ambient_")
+
+    # Lighting entities
+    findExcludeClass("light_")
+    findExcludeClass("light_dynamic")
+    findExcludeClass("light_environment")
+    findExcludeClass("light_spot")
+
+    # Point / target / trigger entities
+    findExcludeClass("point_target")
+    findExcludeClass("point_devshot_camera")
+    findExcludeClass("point_camera")
+    findExcludeClass("point_microphone")
+    findExcludeClass("point_teleport")
+    findExcludeClass("teleport_teleporter")
+
+    # Info entities
+    findExcludeClass("info_null")
+    findExcludeClass("info_target")
+    findExcludeClass("info_teleport_destination")
+    findExcludeClass("info_landing_ground")
+    findExcludeClass("info_node")
+    findExcludeClass("info_node_air")
+    findExcludeClass("info_node_hint")
+    findExcludeClass("info_player_start")
+
+    # NPC bullseye / helper
+    findExcludeClass("npc_bullseye")
+
+    # Game logic entities
+    findExcludeClass("game_player_equip")
+    findExcludeClass("game_player_hurt")
+    findExcludeClass("game_player_spawn")
+    findExcludeClass("game_text")
+    findExcludeClass("game_end")
+
+    # Environment effects
+    findExcludeClass("env_")
+    findExcludeClass("env_fade")
+    findExcludeClass("env_shake")
+    findExcludeClass("env_sound")
+    findExcludeClass("env_sun")
+    findExcludeClass("env_wind")
+
+    # Prefix-based exclusions for entity families
+    findExcludeClass("func_")
+    findExcludeClass("item_")
+    findExcludeClass("prop_")
+    findExcludeClass("npc_helicopter")
+    findExcludeClass("keyframe_rope")
+    findExcludeClass("info_")
+    findExcludeClass("logic_")
+    findExcludeClass("trigger_")
+    findExcludeClass("filter_")
+    findExcludeClass("point_")
+    findExcludeClass("path_")
+    findExcludeClass("math_")
+    findExcludeClass("script_")
+    findExcludeClass("move_")
+    findExcludeClass("phys_")
+    findExcludeClass("game_")
+    findExcludeClass("gmod_wire_")
+    findExcludeClass("worldspawn")
+    findExcludeClass("shadow_*")
+    findExcludeClass("fish*")
+findExcludeClass("firesmoke")
+findExcludeClass("debris")
+    findExcludePlayer(owner())
+}
+
+function void updateLoadedCount() {
+    LoadedCount = 0
+    for (I = 1, MaxRockets) {
+        WorkMissile = Missiles[I, entity]
+        if (StationLoaded[I, number] != 0 & WorkMissile:isValid()) { LoadedCount = LoadedCount + 1 }
+    }
+    Reloading = 0
+    for (I = 1, MaxRockets) {
+        if (StationReloading[I, number] != 0) { Reloading++ }
+    }
+}
+
+if (first()) {
+    # GLOBAL RACK CONFIGURATION
+    # EDIT THIS VALUE: maximum active stations, from 1 to 12.
+    # Only this many station holos and missiles are created. Default = 4.
+    MaxRockets = 4
+    if (MaxRockets < 1) { MaxRockets = 1 }
+    if (MaxRockets > 12) { MaxRockets = 12 }
+    MaxSpeedMPH = 170          # 0 disables the cap; cap is raised if needed to preserve native ACF fin authority.
+    MissileScale = vec(1, 1, 1) # REAL model + collision-mesh scale: vec(0.5, 0.5, 0.5) = half size; vec(1,1,1) = normal.
+    # Scaling is applied to the server physics convexes before rack parenting; chat reports success or a specific failure.
+    GravityScale = 1             # 0-10 multiplier; 1 = normal gravity for missiles and bombs.
+    HomingTurnScale = 0.65       # 0-2 seconds; 0 = native ACF, 0.5 = moderate smoothing, 1 = heavier, 2 = very gradual.
+    ProtectFriendlyMunitions = 1 # 1 = bridge-created missiles/bombs cannot damage one another; 0 = normal ACF damage.
+    SmokeScale = 1              # 0-10; 1 = original Rocket Motor smoke size.
+    SmokeColor = vec(255,255,255) # RGB 0-255; white = original color.
+    SmokeLength = 1             # 0.1-5; 1 = original smoke lifetime/trail length.
+    SmokeOpacity = 145          # 0-255; 145 = existing bridge default.
+    FlameScale = 1              # 0-5; 1 = original Rocket Flame size; independent of smoke.
+    AutoLaunchEnabled = 0       # 0 = manual Fire input; 1 = automatic launch when a target is acquired
+    MultiTargetEnabled = 0      # 0 = all stations share the nearest lock; 1 = assign distinct targets per station
+    PreventRepeatPerLock = 1    # Automatic mode only: prevents repeat firing at the same continuously-held target
+
+    # E2-NATIVE TARGET SEARCH
+    FindingDistance = 50000
+    FindingConeAngle = 120      # TOTAL cone width; code passes half to findInCone()
+    SearchInterval = 0.25       # Search cadence in seconds; findInCone is quota-limited
+    LaunchInterval = 1.0       # Seconds between launch attempts; increase if ACF needs more time
+    LaunchQueueRetryLimit = 3  # Retry a rejected station this many times before advancing
+    DebugTargets = 0           # 1 = print actual found/assigned target classes and launch attempts to chat
+    DebugPrintInterval = 1     # Minimum seconds between full target-candidate dumps
+    LastDebugPrint = 0
+    # FIXED SEARCH HOLOGRAM (ID 9100) - its configured angle defines the cone; it never tracks targets
+    SearchLocalPosition = vec(0, 0, 50)
+    SearchLocalAngle = ang(0, 0, 0)
+
+    # MASTER RACK HOLOGRAM: all active station holos (up to 12) are parented to this anchor.
+    # Moving/rotating the anchor moves/rotates the entire rack as one assembly.
+    RackLocalPosition = vec(0, 0, 0)
+    RackLocalAngle = ang(-10, 0, 0)
+
+    # LAUNCH QUEUE
+    # MissilesPerClick: 0 = exactly one successful launch per activation; 1-MaxRockets = that many.
+    # Failed attempts do not consume the limit. Launches remain spaced by LaunchInterval.
+    MissilesPerClick = 0
+
+    # MultiTargetEnabled defaults to 0 so every station can fire at the same acquired target.
+
+    # SAM-STYLE GUIDANCE HANDOFF
+    # Every missile launches along its station hologram's forward direction.
+    # Its own one-shot E2 Lambda timer releases native ACF guidance after this delay.
+    # The target remains selected during the delay but does not steer the initial launch.
+    # Set to 0 for immediate native ACF guidance.
+    GuidanceStartDelay = 1.5
+
+    # INDEPENDENT RELOAD BEHAVIOR
+    # Each station starts its own timer immediately after a successful launch.
+    # It reloads when this many seconds have elapsed; other stations never wait for it.
+    ReloadDelay = 1
+
+    # NATIVE ACF GUIDANCE - every selected missile, bomb and GBU can request both.
+    # Wire uses the E2 Position/Target outputs; Laser uses ACF's native laser guidance.
+    # Set each station to "Wire" or "Laser". Default is Wire.
+    # Query with acfCleanMissileGuidanceList(WeaponIndices[S, number]).
+    # Examples:
+    # StationGuidanceTypes[1, string] = "Wire"
+    # StationGuidanceTypes[2, string] = "Laser"
+
+    # WARHEAD PAYLOAD:
+    # WarheadFillerMass = 0 keeps the current default filler volume for the chosen round.
+    # Set a positive value (kg) to override the actual ACF explosive filler mass.
+    # ACF's explosion radius/visual scale is calculated from the resulting FillerMass.
+
+    # NATIVE ACF FUSE SELECTION
+    MissileFuse = "Contact"
+    WarheadFillerMass = 0 # kg; 0 = use default, positive = override actual ACF filler mass.
+
+    # STATION CONFIGURATION - set each WeaponIndices[] to an index in RegisteredIDs.
+    # The registry includes BOMB and GBU entries because their gun class type is "missile".
+    # Those no-thrust classes remain gravity-driven and can still use Wire/Laser guidance.
+    # Only stations 1..MaxRockets are created; StationEnabled[] can still disable an active slot.
+    for (I = 1, 12) {
+        WeaponIndices[I, number] = 1
+        StationGuidanceTypes[I, string] = "Wire"
+        StationEnabled[I, number] = 1
+        StationLoaded[I, number] = 0
+        StationFired[I, number] = 0
+        StationReloading[I, number] = 0
+        StationReloadAt[I, number] = 0
+        Missiles[I, entity] = noentity()
+        Targets[I, entity] = noentity()
+    }
+
+    # ================================================================
+    # STATION POSITION CONFIGURATION - StationPositions[]
+    # ================================================================
+    # THIS ARRAY CONTROLS WHERE EACH STATION HOLOGRAM IS PLACED.
+    # Values are LOCAL to the master rack anchor (RackRootHolo).
+    # Changing RackLocalPosition / RackLocalAngle moves the whole rack;
+    # changing an entry below moves only that numbered station.
+    #
+    # STATION NUMBER / ROW:
+    #   1-4   = FRONT ROW
+    #   5-8   = CENTER ROW
+    #   9-12  = REAR ROW
+    #
+    # Format: StationPositions[STATION NUMBER, vector] = vec(X, Y, Z)
+    # Edit the vec(...) values to arrange your rack. There is NO automatic
+    # incomplete-row centering: these exact positions are always respected.
+    # MaxRockets only decides how many stations (1 through MaxRockets) are built.
+    #
+    # FRONT ROW - stations 1, 2, 3, 4
+    StationPositions[1, vector] = vec(0, -30, 70) # FRONT - LEFT OUTER
+    StationPositions[2, vector] = vec(0, -25, 70) # FRONT - LEFT INNER
+    StationPositions[3, vector] = vec(0, 30, 70)  # FRONT - RIGHT OUTER
+    StationPositions[4, vector] = vec(0, 25, 70)  # FRONT - RIGHT INNER
+    # CENTER ROW - stations 5, 6, 7, 8
+    StationPositions[5, vector] = vec(0, -30, 50) # CENTER - LEFT OUTER
+    StationPositions[6, vector] = vec(0, -25, 50) # CENTER - LEFT INNER
+    StationPositions[7, vector] = vec(0, 30, 50)  # CENTER - RIGHT OUTER
+    StationPositions[8, vector] = vec(0, 25, 50)  # CENTER - RIGHT INNER
+    # REAR ROW - stations 9, 10, 11, 12
+    StationPositions[9, vector] = vec(0, -30, 24)  # REAR - LEFT OUTER
+    StationPositions[10, vector] = vec(0, -25, 24) # REAR - LEFT INNER
+    StationPositions[11, vector] = vec(0, 30, 24)  # REAR - RIGHT OUTER
+    StationPositions[12, vector] = vec(0, 25, 24)  # REAR - RIGHT INNER
+
+    # ================================================================
+    # STATION ANGLE CONFIGURATION - StationAngles[]
+    # ================================================================
+    # THIS ARRAY CONTROLS WHICH DIRECTION EACH STATION FACES.
+    # Angles are LOCAL to each station's parent (the master rack anchor).
+    # Rotating the master rack rotates every station; changing one entry
+    # below rotates only that numbered station relative to the rack.
+    #
+    # Format: StationAngles[STATION NUMBER, angle] = ang(PITCH, YAW, ROLL)
+    #   PITCH = up/down tilt
+    #   YAW   = left/right turn
+    #   ROLL  = rotate around the station's forward axis
+    # ang(0, 0, 0) means straight ahead with no additional station rotation.
+    #
+    # FRONT ROW - stations 1, 2, 3, 4
+    StationAngles[1, angle] = ang(0, 0, 0) # FRONT - LEFT OUTER
+    StationAngles[2, angle] = ang(0, 0, 0) # FRONT - LEFT INNER
+    StationAngles[3, angle] = ang(0, 0, 0) # FRONT - RIGHT OUTER
+    StationAngles[4, angle] = ang(0, 0, 0) # FRONT - RIGHT INNER
+    # CENTER ROW - stations 5, 6, 7, 8
+    StationAngles[5, angle] = ang(0, 0, 0) # CENTER - LEFT OUTER
+    StationAngles[6, angle] = ang(0, 0, 0) # CENTER - LEFT INNER
+    StationAngles[7, angle] = ang(0, 0, 0) # CENTER - RIGHT OUTER
+    StationAngles[8, angle] = ang(0, 0, 0) # CENTER - RIGHT INNER
+    # REAR ROW - stations 9, 10, 11, 12
+    StationAngles[9, angle] = ang(0, 0, 0)  # REAR - LEFT OUTER
+    StationAngles[10, angle] = ang(0, 0, 0) # REAR - LEFT INNER
+    StationAngles[11, angle] = ang(0, 0, 0) # REAR - RIGHT OUTER
+    StationAngles[12, angle] = ang(0, 0, 0) # REAR - RIGHT INNER
+
+    # DEFAULT MISSILE / BOMB SELECTION.
+    # One-based index into RegisteredIDs; check the output for your server's exact mapping.
+    # This is the default weapon assigned to all stations unless overridden below.
+    MissileIndex = 17
+
+    # PER-STATION WEAPON SELECTION.
+    # Each value is a ONE-BASED index into RegisteredIDs.
+    # Every station defaults to MissileIndex (17, BGM-71E on the current server mapping); change any individual entry
+    # to give that station a different missile, BOMB or GBU.
+    WeaponIndices[1, number] = MissileIndex
+    WeaponIndices[2, number] = MissileIndex
+    WeaponIndices[3, number] = MissileIndex
+    WeaponIndices[4, number] = MissileIndex
+    WeaponIndices[5, number] = MissileIndex
+    WeaponIndices[6, number] = MissileIndex
+    WeaponIndices[7, number] = MissileIndex
+    WeaponIndices[8, number] = MissileIndex
+    WeaponIndices[9, number] = MissileIndex
+    WeaponIndices[10, number] = MissileIndex
+    WeaponIndices[11, number] = MissileIndex
+    WeaponIndices[12, number] = MissileIndex
+
+    # Example: override only station 3 to use registry entry 8:
+    # WeaponIndices[3, number] = 8
+
+    # Seed edge detectors from the live inputs so a held input at chip startup
+    # is not mistaken for a fresh press.
+    LastFire = Fire
+    LastReset = Reset
+    LaunchQueueActive = 0
+    LaunchQueueNext = 1
+    LaunchQueueAutoMode = 0
+    LaunchQueueFired = 0
+    LaunchQueueRetryCount = 0
+    HoloBuildIndex = 0
+    SetupComplete = 0
+    SalvoShots = 0
+    Status = "BUILDING RACK ANCHOR AND " + MaxRockets + " STATION HOLOGRAM(S)"
+    CreateStatus = acfCleanMissileStatus()
+    RegisteredIDs = acfCleanMissileList()
+    configureFindFilters()
+
+    # Create one hologram per timer pass to respect Wire hologram spawn throttling.
+    timer("build_holos", 0.25, 0, function() {
+        if (holoCanCreate()) {
+            if (HoloBuildIndex == 0) {
+                # Invisible master anchor: all station holos inherit its transform.
+                holoCreate(8999)
+                holoModel(8999, "models/holograms/cube.mdl")
+                holoScale(8999, vec(0.01))
+                holoAlpha(8999, 0)
+                holoParent(8999, entity())
+                holoLocalPos(8999, RackLocalPosition)
+                holoLocalAng(8999, RackLocalAngle)
+                RackRootHolo = holoEntity(8999)
+                if (RackRootHolo:isValid()) {
+                    findExcludeEntity(RackRootHolo)
+                    HoloBuildIndex = 1
+                }
+            } elseif (HoloBuildIndex <= MaxRockets) {
+                holoCreate(9000 + HoloBuildIndex)
+                holoModel(9000 + HoloBuildIndex, "models/holograms/cube.mdl")
+                holoScale(9000 + HoloBuildIndex, vec(1.5, 0.35, 0.35))
+                holoColor(9000 + HoloBuildIndex, vec(30, 170, 255))
+                holoParent(9000 + HoloBuildIndex, RackRootHolo)
+                holoLocalPos(9000 + HoloBuildIndex, StationPositions[HoloBuildIndex, vector])
+                holoLocalAng(9000 + HoloBuildIndex, StationAngles[HoloBuildIndex, angle])
+                WorkHolo = holoEntity(9000 + HoloBuildIndex)
+                RackHolos[HoloBuildIndex, entity] = WorkHolo
+                if (WorkHolo:isValid()) {
+                    findExcludeEntity(WorkHolo)
+                    HoloBuildIndex++
+                }
+            } else {
+                holoCreate(9100)
+                holoModel(9100, "models/holograms/cone.mdl")
+                holoScale(9100, vec(0.8, 0.8, 2))
+                holoColor(9100, vec(255, 220, 40))
+                holoParent(9100, entity())
+                holoLocalPos(9100, SearchLocalPosition)
+                holoLocalAng(9100, SearchLocalAngle)
+                SearchHolo = holoEntity(9100)
+                if (SearchHolo:isValid()) {
+                    findExcludeEntity(SearchHolo)
+                    SetupComplete = 1
+                    stoptimer("build_holos")
+                    RegisteredIDs = acfCleanMissileList()
+                    Status = "HOLOGRAMS READY - LOADING " + MaxRockets + " STATION(S)"
+                    timer("initial_load", 0.5, function() {
+                        loadAllStations()
+                        timer("target_scan", SearchInterval, 0, function() {
+                            scanTargets()
+                            updateLoadedCount()
+                        })
+                        timer("guidance_position", 1 / 66, 0, function() {
+                            updateGuidancePosition()
+                        })
+                        timer("station_reload_service", 0.05, 0, function() {
+                            serviceStationReloads()
+                            updateLoadedCount()
+                        })
+                    })
+                }
+            }
+        }
+    })
+}
+
+event input(InputName:string) {
+    # Rising-edge detection: one press creates one activation; holding Fire does not repeat.
+    if (InputName == "Fire" & Fire != 0 & LastFire == 0) {
+        launchSalvo(0)
+    }
+    if (InputName == "Reset" & Reset != 0 & LastReset == 0) {
+        if (SetupComplete == 0) {
+            Status = "RESET BLOCKED: STATION HOLOGRAMS ARE STILL BUILDING"
+        } else {
+            stoptimer("launch_queue")
+            LaunchQueueActive = 0
+            LaunchQueueNext = 1
+            LaunchQueueFired = 0
+            for (I = 1, MaxRockets) {
+                StationReloading[I, number] = 0
+                StationReloadAt[I, number] = 0
+                WorkMissile = Missiles[I, entity]
+                if (WorkMissile:isValid()) { acfCleanMissileRemove(WorkMissile) }
+                Missiles[I, entity] = noentity()
+                StationLoaded[I, number] = 0
+                StationFired[I, number] = 0
+                Targets[I, entity] = noentity()
+            }
+            loadAllStations()
+            Status = "RESET: ACTIVE STATIONS RELOADING"
+        }
+    }
+    if (InputName == "Fire") { LastFire = Fire }
+    if (InputName == "Reset") { LastReset = Reset }
+}
+
+event removed(Resetting:number) {
+    stopAllTimers()
+    for (I = 1, 12) {
+        WorkMissile = Missiles[I, entity]
+        if (WorkMissile:isValid()) { acfCleanMissileRemove(WorkMissile) }
+        WorkHolo = holoEntity(9000 + I)
+        if (WorkHolo:isValid()) { holoDelete(9000 + I) }
+    }
+    SearchHolo = holoEntity(9100)
+    if (SearchHolo:isValid()) { holoDelete(9100) }
+    RackRootHolo = holoEntity(8999)
+    if (RackRootHolo:isValid()) { holoDelete(8999) }
+}
+
+
+
